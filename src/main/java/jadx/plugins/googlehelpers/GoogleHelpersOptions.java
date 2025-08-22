@@ -1,4 +1,4 @@
-package jadx.plugins.example;
+package jadx.plugins.googlehelpers;
 
 import jadx.api.plugins.options.impl.BasePluginOptionsBuilder;
 
@@ -13,17 +13,17 @@ public class GoogleHelpersOptions extends BasePluginOptionsBuilder {
 
     @Override
     public void registerOptions() {
-        strOption(JadxExamplePlugin.PLUGIN_ID + ".targetClass")
+        strOption(GoogleHelpersPlugin.PLUGIN_ID + ".targetClass")
                 .description("class to process (optional), e.g. a.b.C or a/b/C")
                 .defaultValue("")
                 .setter(v -> targetClass = v);
 
-        strOption(JadxExamplePlugin.PLUGIN_ID + ".factoryMethodRef")
+        strOption(GoogleHelpersPlugin.PLUGIN_ID + ".factoryMethodRef")
                 .description("factory method ref\ne.g. com/google/common/flogger/GoogleLogger->c(Ljava/lang/String;)Lcom/google/common/flogger/GoogleLogger;")
                 .defaultValue("")
                 .setter(v -> factoryMethodRef = v);
 
-        strOption(JadxExamplePlugin.PLUGIN_ID + ".locationMethodRef")
+        strOption(GoogleHelpersPlugin.PLUGIN_ID + ".locationMethodRef")
                 .description("location method ref\ne.g. a/b/C->x(Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V")
                 .defaultValue("")
                 .setter(v -> locationMethodRef = v);

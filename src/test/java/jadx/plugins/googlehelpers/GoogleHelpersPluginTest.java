@@ -1,4 +1,4 @@
-package jadx.plugins.example;
+package jadx.plugins.googlehelpers;
 
 import jadx.api.JadxArgs;
 import jadx.api.JadxDecompiler;
@@ -11,7 +11,7 @@ import java.net.URL;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-class JadxExamplePluginTest {
+class GoogleHelpersPluginTest {
 
     @Test
     public void integrationTest() throws Exception {

@@ -1,4 +1,4 @@
-package jadx.plugins.example;
+package jadx.plugins.googlehelpers;
 
 import java.util.Objects;
 

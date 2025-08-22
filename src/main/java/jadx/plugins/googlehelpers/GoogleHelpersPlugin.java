@@ -1,8 +1,7 @@
-package jadx.plugins.example;
+package jadx.plugins.googlehelpers;
 
 import jadx.api.JavaClass;
 import jadx.api.JavaNode;
-import jadx.api.metadata.ICodeNodeRef;
 import jadx.api.plugins.JadxPlugin;
 import jadx.api.plugins.JadxPluginContext;
 import jadx.api.plugins.JadxPluginInfo;
@@ -12,9 +11,9 @@ import jadx.core.dex.nodes.ClassNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class JadxExamplePlugin implements JadxPlugin {
+public class GoogleHelpersPlugin implements JadxPlugin {
     public static final String PLUGIN_ID = "google-helpers";
-    private static final Logger LOG = LoggerFactory.getLogger(JadxExamplePlugin.class);
+    private static final Logger LOG = LoggerFactory.getLogger(GoogleHelpersPlugin.class);
 
     private final GoogleHelpersOptions options = new GoogleHelpersOptions();
     private volatile RenameFromLogsPass.MethodRef cachedFactoryRef;
@@ -47,48 +46,7 @@ public class JadxExamplePlugin implements JadxPlugin {
                 JavaClass jCls = (jNode instanceof JavaClass) ? (JavaClass) jNode : jNode.getDeclaringClass();
                 if (jCls == null) return;
                 ClassNode cls = jCls.getClassNode();
-                RenameFromLogsPass.MethodRef factory;
-                if (!options.getFactoryMethodRef().isEmpty()) {
-                    factory = RenameFromLogsPass.MethodRef.parse(options.getFactoryMethodRef());
-                } else {
-                    RenameFromLogsPass.MethodRef cached = cachedFactoryRef;
-                    if (cached == null) {
-                        cached = RenameFromLogsPass.discoverGoogleLoggerFactory(cls.root());
-                        cachedFactoryRef = cached; // may be null
-                    }
-                    factory = cached;
-                }
-                RenameFromLogsPass.MethodRef location = RenameFromLogsPass.MethodRef.parse(options.getLocationMethodRef());
-                boolean changed = RenameFromLogsPass.renameClassFromLogs(cls, factory, location);
-                if (changed) {
-                    LOG.info("google-helpers: class renamed, refreshing tab");
-                    gui.reloadActiveTab();
-                } else {
-                    LOG.info("google-helpers: no changes made");
-                }
-            });
-
-            // Plugins top menu action (uses caret location)
-            gui.addMenuAction("Google helpers: Rename class from logs", () -> {
-                LOG.info("google-helpers: menu action invoked");
-                ICodeNodeRef ref = gui.getEnclosingNodeUnderCaret();
-                if (ref == null) return;
-                JavaNode jNode = context.getDecompiler().getJavaNodeByRef(ref);
-                if (jNode == null) return;
-                JavaClass jCls = (jNode instanceof JavaClass) ? (JavaClass) jNode : jNode.getDeclaringClass();
-                if (jCls == null) return;
-                ClassNode cls = jCls.getClassNode();
-                RenameFromLogsPass.MethodRef factory;
-                if (!options.getFactoryMethodRef().isEmpty()) {
-                    factory = RenameFromLogsPass.MethodRef.parse(options.getFactoryMethodRef());
-                } else {
-                    RenameFromLogsPass.MethodRef cached = cachedFactoryRef;
-                    if (cached == null) {
-                        cached = RenameFromLogsPass.discoverGoogleLoggerFactory(cls.root());
-                        cachedFactoryRef = cached;
-                    }
-                    factory = cached;
-                }
+                RenameFromLogsPass.MethodRef factory = resolveFactory(cls);
                 RenameFromLogsPass.MethodRef location = RenameFromLogsPass.MethodRef.parse(options.getLocationMethodRef());
                 boolean changed = RenameFromLogsPass.renameClassFromLogs(cls, factory, location);
                 if (changed) {
@@ -101,5 +59,17 @@ public class JadxExamplePlugin implements JadxPlugin {
         } else {
             LOG.debug("google-helpers: GUI context not available (CLI mode)");
         }
+    }
+
+    private RenameFromLogsPass.MethodRef resolveFactory(ClassNode cls) {
+        if (!options.getFactoryMethodRef().isEmpty()) {
+            return RenameFromLogsPass.MethodRef.parse(options.getFactoryMethodRef());
+        }
+        RenameFromLogsPass.MethodRef cached = cachedFactoryRef;
+        if (cached == null) {
+            cached = RenameFromLogsPass.discoverGoogleLoggerFactory(cls.root());
+            cachedFactoryRef = cached; // may be null
+        }
+        return cached;
     }
 }
