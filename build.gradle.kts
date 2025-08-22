@@ -21,6 +21,9 @@ dependencies {
         isChanging = isJadxSnapshot
     }
 
+    // logging API (provided by host environment at runtime)
+    compileOnly("org.slf4j:slf4j-api:2.0.16")
+
 	testImplementation("io.github.skylot:jadx-smali-input:$jadxVersion") {
         isChanging = isJadxSnapshot
     }
@@ -42,7 +45,7 @@ java {
     targetCompatibility = JavaVersion.VERSION_11
 }
 
-version = System.getenv("VERSION") ?: "dev"
+version = System.getenv("VERSION") ?: "0.1.0"
 
 tasks {
     withType(Test::class) {

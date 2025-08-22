@@ -32,3 +32,6 @@ idea/
 *.log
 *.cfg
 *.orig
+
+local.properties
+/jadx/

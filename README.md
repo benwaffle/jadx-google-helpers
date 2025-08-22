@@ -1,12 +1,26 @@
 
- ## JADX Example plugin
+## google-helpers (JADX plugin)
 
-Simple example of jadx plugin.
-Adds a jadx watermark comment to every generated java class
+Helpers for reverse engineering Google apps in JADX.
+Renames classes in Google APKs based on log strings.
 
-Install using location id: `github:jadx-decompiler:jadx-example-plugin`
+- Homepage: https://github.com/benwaffle/jadx-google-helpers
+- Install location id: `github:benwaffle:jadx-google-helpers`
 
 In jadx-cli:
 ```bash
-  jadx plugins --install "github:jadx-decompiler:jadx-example-plugin"
+jadx plugins --install "github:benwaffle:jadx-google-helpers"
+```
+
+Options (pass with `-P<name>=<value>`):
+- `google-helpers.targetClass`: class to process, e.g. `a/b/C` or `a.b.C` (required for now)
+- `google-helpers.factoryMethodRef`: method ref like `com/google/common/flogger/GoogleLogger->c(Ljava/lang/String;)Lcom/google/common/flogger/GoogleLogger;`
+- `google-helpers.locationMethodRef`: method ref like `x/y/AnotherLogger->setLocation(Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;)V`
+
+Example:
+```bash
+jadx -Pgoogle-helpers.targetClass=a/b/C \
+     -Pgoogle-helpers.factoryMethodRef=com/google/common/flogger/GoogleLogger->c\(Ljava/lang/String;\)Lcom/google/common/flogger/GoogleLogger; \
+     -Pgoogle-helpers.locationMethodRef=obf/p/Q->a\(Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;\)V \
+     -d out app.apk
 ```
