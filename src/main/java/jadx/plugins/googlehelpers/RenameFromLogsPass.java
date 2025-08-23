@@ -29,6 +29,7 @@ public class RenameFromLogsPass implements JadxDecompilePass {
 
     private MethodRef resolvedFactoryRef;
     private MethodRef resolvedLocationRef;
+    private static ClassNode discoveredILoggerIface; // cache discovered ILogger interface
 
     public RenameFromLogsPass(GoogleHelpersOptions options) {
         this.options = options;
@@ -56,31 +57,44 @@ public class RenameFromLogsPass implements JadxDecompilePass {
                 LOG.info("google-helpers: factoryRef not configured and discovery failed");
             }
         }
-        resolvedLocationRef = MethodRef.parse(options.getLocationMethodRef());
+        String locOpt = options.getLocationMethodRef();
+        if (locOpt != null && !locOpt.isEmpty()) {
+            resolvedLocationRef = MethodRef.parse(locOpt);
+            LOG.info("google-helpers: using configured locationRef={}", resolvedLocationRef);
+        } else {
+            resolvedLocationRef = discoverILoggerSetLocation(root);
+            if (resolvedLocationRef != null) {
+                LOG.info("google-helpers: discovered locationRef={} on load", resolvedLocationRef);
+            } else {
+                LOG.info("google-helpers: locationRef not configured and discovery failed");
+            }
+        }
     }
 
     @Override
     public boolean visit(ClassNode cls) {
         String target = options.getTargetClass();
-        if (target.isEmpty()) {
-            LOG.debug("google-helpers: pass skipped (no targetClass set)");
-            return true; // no automatic run without explicit target
+        if (target == null || target.isEmpty()) {
+            // Skip in decompile pass unless explicitly targeted.
+            // Auto-run is handled by the AfterLoad pass.
+            LOG.trace("google-helpers: decompile pass skipped (no targetClass set)");
+            return true;
         }
         String normTarget = normalizeClassName(target);
         String clsRaw = cls.getRawName();
         String clsFull = cls.getFullName();
         if (!clsRaw.endsWith(normTarget) && !clsFull.equals(normTarget.replace('/', '.'))) {
-            return true; // other class
+            return true; // not the targeted class
         }
-        LOG.info("google-helpers: processing class: {}", cls.getFullName());
+        LOG.debug("google-helpers: processing class: {}", cls.getFullName());
         MethodRef factoryRef = resolvedFactoryRef;
         MethodRef locationRef = resolvedLocationRef;
-        LOG.info("google-helpers: using factoryRef={}, locationRef={}",
-                factoryRef != null ? factoryRef : "<auto-none>",
-                locationRef != null ? locationRef : "<not-set>");
+//        LOG.debug("google-helpers: using factoryRef={}, locationRef={}",
+//                factoryRef != null ? factoryRef : "<auto-none>",
+//                locationRef != null ? locationRef : "<not-set>");
         boolean changed = renameClassFromLogs(cls, factoryRef, locationRef);
         if (!changed) {
-            LOG.info("google-helpers: no matching logger calls found for {}", cls.getFullName());
+            LOG.trace("google-helpers: no matching logger calls found for {}", cls.getFullName());
         }
         return true; // skip method visits
     }
@@ -95,71 +109,136 @@ public class RenameFromLogsPass implements JadxDecompilePass {
         if (factoryRef == null && locationRef == null) {
             LOG.info("google-helpers: both factoryRef and locationRef are null; nothing to match");
         }
-        MethodNode mth = cls.getClassInitMth();
-        if (mth == null) {
-            LOG.info("google-helpers: <clinit> not found in {}", cls.getFullName());
-            return false;
+
+        boolean changed = false;
+
+        // First pass: try to match factoryRef in <clinit> and <init>
+        if (factoryRef != null) {
+            MethodNode clinit = cls.getClassInitMth();
+            if (clinit != null) {
+                changed |= scanMethodForRename(clinit, factoryRef, null);
+            } else {
+                // LOG.info("google-helpers: <clinit> not found in {}", cls.getFullName());
+            }
+            boolean anyCtor = false;
+            for (MethodNode m : cls.getMethods()) {
+                if (!m.getMethodInfo().isConstructor()) continue;
+                anyCtor = true;
+                changed |= scanMethodForRename(m, factoryRef, null);
+            }
+            if (!anyCtor) {
+                LOG.debug("google-helpers: no <init> constructors found for {}", cls.getFullName());
+            }
         }
+
+        // Second pass: try locationRef across all methods
+        if (locationRef != null) {
+            MethodNode clinit = cls.getClassInitMth();
+            if (clinit != null) {
+                changed |= scanMethodForRename(clinit, null, locationRef);
+            }
+            for (MethodNode m : cls.getMethods()) {
+                changed |= scanMethodForRename(m, null, locationRef);
+            }
+        }
+        return changed;
+    }
+
+    private static boolean scanMethodForRename(MethodNode mth, MethodRef factoryRef, MethodRef locationRef) {
+        String owner = mth.getParentClass().getFullName();
+        String mthName = mth.getMethodInfo().getName();
         try {
-            LOG.debug("google-helpers: <clinit> initial state: isNoCode={} loaded? (implicit)", mth.isNoCode());
+//            LOG.debug("google-helpers: scanning {} {} (preload isNoCode={})", mthName, mth.getMethodInfo().getRawFullId(), mth.isNoCode());
             mth.load();
         } catch (DecodeException e) {
-            LOG.warn("google-helpers: failed to load <clinit> for {}: {}", cls.getFullName(), e.getMessage());
+            LOG.warn("google-helpers: failed to load {} for {}: {}", mthName, owner, e.getMessage());
             return false;
         }
         InsnNode[] insns = mth.getInstructions();
         if ((insns == null || insns.length == 0) && mth.isNoCode()) {
-            // try reload (forces re-decode)
             try {
-                LOG.debug("google-helpers: <clinit> has no code after load, trying reload for {}", cls.getFullName());
+                LOG.debug("google-helpers: {} has no code after load, trying reload for {}", mthName, owner);
                 mth.reload();
                 insns = mth.getInstructions();
             } catch (Exception e) {
-                LOG.debug("google-helpers: reload failed for {}: {}", cls.getFullName(), e.toString());
+                LOG.debug("google-helpers: reload failed for {} {}: {}", mthName, owner, e.toString());
             }
         }
         if (insns == null || insns.length == 0) {
-            LOG.debug("google-helpers: <clinit> has no instructions for {}", cls.getFullName());
+            LOG.debug("google-helpers: {} has no instructions for {}", mthName, owner);
             return false;
         }
-        LOG.debug("google-helpers: scanning <clinit> {} ({} insns)", mth.getMethodInfo().getRawFullId(), insns.length);
+//        LOG.debug("google-helpers: scanning {} {} ({} insns)", mthName, mth.getMethodInfo().getRawFullId(), insns.length);
+        boolean changed = false;
         for (int i = 0; i < insns.length; i++) {
             InsnNode insn = insns[i];
-            LOG.debug("google-helpers: insn #{} {}", i, insn);
+//            LOG.debug("google-helpers: insn #{} {}", i, insn);
             if (!(insn instanceof InvokeNode)) {
                 continue;
             }
             InvokeNode inv = (InvokeNode) insn;
             MethodInfo call = inv.getCallMth();
-            LOG.debug("google-helpers: invoke at #{}, call={}", i, call.getRawFullId());
+//            LOG.debug("google-helpers: invoke at #{}, call={}", i, call.getRawFullId());
             if (factoryRef != null) {
                 boolean match = methodMatches(call, factoryRef);
-                LOG.debug("google-helpers: compare with factoryRef {} => {}", refToString(factoryRef), match);
+//                LOG.debug("google-helpers: compare with factoryRef {} => {}", refToString(factoryRef), match);
                 if (match) {
                     String clsName = extractStringArg(inv, 0, i, insns);
                     if (clsName != null) {
-                        LOG.info("google-helpers: found factory call {} in {} -> {}",
-                                call.getRawFullId(), mth.getMethodInfo().getRawFullId(), clsName);
+//                        LOG.info("google-helpers: found factory call {} in {} -> {}",
+//                                call.getRawFullId(), mth.getMethodInfo().getRawFullId(), clsName);
                         renameDeclaringClass(mth.getParentClass(), clsName);
-                        return true;
+                        changed = true;
+                        break;
                     }
                 }
             }
             if (locationRef != null) {
-                boolean match = methodMatches(call, locationRef);
-                LOG.debug("google-helpers: compare with locationRef {} => {}", refToString(locationRef), match);
+                boolean match = locationCallMatches(mth.getParentClass().root(), call, locationRef);
+//                LOG.debug("google-helpers: compare with locationRef {} => {}", refToString(locationRef), match);
                 if (match) {
                     String clsName = extractStringArg(inv, 0, i, insns);
                     if (clsName != null) {
-                        LOG.info("google-helpers: found location call {} in {} -> {}",
-                                call.getRawFullId(), mth.getMethodInfo().getRawFullId(), clsName);
+//                        LOG.info("google-helpers: found location call {} in {} -> {}",
+//                                call.getRawFullId(), mth.getMethodInfo().getRawFullId(), clsName);
                         renameDeclaringClass(mth.getParentClass(), clsName);
-                        return true;
+                        changed = true;
                     }
+                    String newMthName = extractStringArg(inv, 1, i, insns);
+                    if (newMthName != null && renameMethodIfValid(mth, newMthName)) {
+                        changed = true;
+                    }
+                    break;
                 }
             }
         }
-        return false;
+        return changed;
+    }
+
+    private static boolean renameMethodIfValid(MethodNode mth, String rawName) {
+        if (mth.getMethodInfo().isConstructor()) return false;
+        String name = rawName.trim();
+        if (name.isEmpty()) return false;
+        if (!isValidJavaIdentifier(name)) {
+            LOG.debug("google-helpers: invalid method name '{}' for {}", name, mth.getMethodInfo().getRawFullId());
+            return false;
+        }
+        String cur = mth.getMethodInfo().getName();
+        if (cur.equals(name)) return false;
+        LOG.info("google-helpers: renaming method {} -> {}", mth.getMethodInfo().getRawFullId(), name);
+        mth.rename(name);
+        return true;
+    }
+
+    private static boolean isValidJavaIdentifier(String s) {
+        if (s.isEmpty()) return false;
+        char c0 = s.charAt(0);
+        if (!(Character.isLetter(c0) || c0 == '_' || c0 == '$')) return false;
+        for (int i = 1; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (!(Character.isLetterOrDigit(c) || c == '_' || c == '$')) return false;
+        }
+        return true;
     }
 
     private static boolean methodMatches(MethodInfo call, MethodRef ref) {
@@ -170,13 +249,79 @@ public class RenameFromLogsPass implements JadxDecompilePass {
         String expectedShortId = buildShortId(ref);
         boolean eq = call.getShortId().equals(expectedShortId);
         if (!eq) {
-            LOG.debug("google-helpers: shortId mismatch: got={}, expected={}", call.getShortId(), expectedShortId);
+//            LOG.debug("google-helpers: shortId mismatch: got={}, expected={}", call.getShortId(), expectedShortId);
         }
         return eq;
     }
 
     private static String ownerDot(MethodInfo call) {
         return call.getDeclClass().getFullName();
+    }
+
+    private static boolean locationCallMatches(RootNode root, MethodInfo call, MethodRef ref) {
+        if (ref == null) return false;
+        // 1) name must match
+        if (!call.getName().equals(ref.name)) {
+//            LOG.debug("google-helpers: location match: name mismatch call={} ref={}", call.getName(), ref.name);
+            return false;
+        }
+        // 2) args must match (ignore return type)
+        String shortId = call.getShortId(); // name(args)ret
+        int parenOpen = shortId.indexOf('(');
+        int parenClose = shortId.indexOf(')');
+        if (parenOpen <= 0 || parenClose <= parenOpen) {
+//            LOG.debug("google-helpers: location match: bad shortId {}", shortId);
+            return false;
+        }
+        String callArgs = shortId.substring(parenOpen + 1, parenClose);
+        String expectedArgs = String.join("", ref.argTypes);
+        if (!callArgs.equals(expectedArgs)) {
+//            LOG.debug("google-helpers: location match: args mismatch call={} expected={}", callArgs, expectedArgs);
+            return false;
+        }
+        // 3) owner must be ref.ownerDot or a sub-interface/impl of it
+        String callOwnerName = ownerDot(call);
+        if (callOwnerName.equals(ref.ownerDot)) {
+//            LOG.debug("google-helpers: location match: owner equals {}", callOwnerName);
+            return true;
+        }
+        try {
+            ClassNode callOwner = root.resolveClass(ClassInfo.fromName(root, callOwnerName));
+            ClassNode target = root.resolveClass(ClassInfo.fromName(root, ref.ownerDot));
+            if (target == null && discoveredILoggerIface != null) {
+                target = discoveredILoggerIface;
+            }
+            if (callOwner != null && target != null) {
+                boolean sub = isSubtypeOf(callOwner, target);
+//                LOG.debug("google-helpers: location match: owner subtype {} -> {} = {}", callOwner.getFullName(), target.getFullName(), sub);
+                if (sub) return true;
+            } else {
+                LOG.debug("google-helpers: location match: resolve failed callOwner={} target={}", callOwner, target);
+            }
+        } catch (Throwable ignore) {
+            // ignore and fallthrough
+        }
+        return false;
+    }
+
+    private static boolean isSubtypeOf(ClassNode child, ClassNode target) {
+        if (child == target) return true;
+        final boolean[] found = { false };
+        RootNode root = child.root();
+        child.visitSuperTypes((argThis, superType) -> {
+            if (found[0]) return; // already found
+            if (superType != null && superType.isObject()) {
+                try {
+                    ClassNode superNode = root.resolveClass(superType);
+                    if (superNode == target) {
+                        found[0] = true;
+                    }
+                } catch (Throwable ignore) {
+                    // ignore resolution issues
+                }
+            }
+        });
+        return found[0];
     }
 
     private static String buildShortId(MethodRef ref) {
@@ -221,15 +366,15 @@ public class RenameFromLogsPass implements JadxDecompilePass {
             InsnNode wrap = ((InsnWrapArg) arg).getWrapInsn();
             if (wrap.getType() == InsnType.CONST_STR) {
                 String s = ((ConstStringNode) wrap).getString();
-                LOG.debug("google-helpers: string arg from wrap: {}", s);
+//                LOG.debug("google-helpers: string arg from wrap: {}", s);
                 return s;
             }
-            LOG.debug("google-helpers: arg is wrap of {} (not string)", wrap.getType());
+//            LOG.debug("google-helpers: arg is wrap of {} (not string)", wrap.getType());
         }
         // simple backtrack through previous assignments / moves
         if (arg.isRegister()) {
             int reg = ((RegisterArg) arg).getRegNum();
-            LOG.debug("google-helpers: tracing string from register v{}", reg);
+//            LOG.debug("google-helpers: tracing string from register v{}", reg);
             return traceStringFromRegister(reg, pos, insns, 10);
         }
         LOG.debug("google-helpers: arg is neither wrap nor register ({}), skipping", arg.getClass().getSimpleName());
@@ -241,7 +386,7 @@ public class RenameFromLogsPass implements JadxDecompilePass {
         for (int i = startPos - 1; i >= 0 && steps < limit; i--, steps++) {
             InsnNode prev = insns[i];
             if (prev == null) {
-                LOG.debug("google-helpers: trace skipped null insn at #{}", i);
+//                LOG.debug("google-helpers: trace skipped null insn at #{}", i);
                 continue;
             }
             RegisterArg res = prev.getResult();
@@ -250,24 +395,24 @@ public class RenameFromLogsPass implements JadxDecompilePass {
             }
             if (prev.getType() == InsnType.CONST_STR) {
                 String s = ((ConstStringNode) prev).getString();
-                LOG.debug("google-helpers: string arg from const: {}", s);
+//                LOG.debug("google-helpers: string arg from const: {}", s);
                 return s;
             }
             if (prev.getType() == InsnType.MOVE) {
                 InsnArg src = prev.getArg(0);
                 if (src.isRegister()) {
                     reg = ((RegisterArg) src).getRegNum();
-                    LOG.debug("google-helpers: follow move chain to v{}", reg);
+//                    LOG.debug("google-helpers: follow move chain to v{}", reg);
                     continue; // follow move chain
                 }
                 if (src.isInsnWrap()) {
                     InsnNode wrap = ((InsnWrapArg) src).getWrapInsn();
                     if (wrap.getType() == InsnType.CONST_STR) {
                         String s = ((ConstStringNode) wrap).getString();
-                        LOG.debug("google-helpers: string arg from move-wrap: {}", s);
+//                        LOG.debug("google-helpers: string arg from move-wrap: {}", s);
                         return s;
                     }
-                    LOG.debug("google-helpers: move-wrap is {} (not string)", wrap.getType());
+//                    LOG.debug("google-helpers: move-wrap is {} (not string)", wrap.getType());
                 }
             }
             LOG.debug("google-helpers: non-const producer for v{}: {}", reg, prev.getType());
@@ -376,6 +521,88 @@ public class RenameFromLogsPass implements JadxDecompilePass {
             }
             LOG.warn("google-helpers: GoogleLogger factory method not found");
         } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    public static MethodRef discoverILoggerSetLocation(RootNode root) {
+        try {
+            // 1) Find AbstractLogger
+            ClassInfo alInfo = ClassInfo.fromName(root, "com.google.common.flogger.AbstractLogger");
+            ClassNode al = root.resolveClass(alInfo);
+            if (al == null) {
+                LOG.warn("google-helpers: AbstractLogger class not found in input");
+                return null;
+            }
+            // 2) Try to infer ILogger type from a method taking java.util.logging.Level and returning an interface
+            ArgType levelType = ArgType.object("java.util.logging.Level");
+            ClassNode iLoggerIface = null;
+            for (MethodNode m : al.getMethods()) {
+                if (m.getArgTypes().size() == 1 && m.getArgTypes().get(0).equals(levelType)) {
+                    ArgType ret = m.getReturnType();
+                    if (ret.isObject()) {
+                        String obj = ret.getObject();
+                        if (obj != null) {
+                            ClassInfo ri = ClassInfo.fromName(root, obj);
+                            ClassNode rc = root.resolveClass(ri);
+                            if (rc != null && rc.getAccessFlags().isInterface()) {
+                                iLoggerIface = rc; // keep direct reference to avoid rename issues
+                                LOG.info("google-helpers: discovered ILogger candidate via return type: {}", rc.getFullName());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (iLoggerIface == null) {
+                LOG.warn("google-helpers: failed to discover ILogger via AbstractLogger methods");
+                return null;
+            }
+
+            // 3) In ILogger interface, find setLocation-like method with (String, String, int, String) signature
+            ClassNode iloggerCls = iLoggerIface;
+            ArgType str = ArgType.STRING;
+            ArgType i32 = ArgType.INT;
+            for (MethodNode m : iloggerCls.getMethods()) {
+				LOG.debug("google-helpers: checking {} for setLocation", m);
+                if (m.getArgTypes().size() == 4
+                        && m.getArgTypes().get(0).equals(str)
+                        && m.getArgTypes().get(1).equals(str)
+                        && m.getArgTypes().get(2).equals(i32)
+                        && m.getArgTypes().get(3).equals(str)) {
+                    // Require methods that return ILogger (no void). Compare by resolved class to handle renames.
+                    ArgType ret = m.getReturnType();
+                    boolean returnsILogger = false;
+                    if (ret.isObject()) {
+                        try {
+                            ClassNode retCls = root.resolveClass(ClassInfo.fromName(root, ret.getObject()));
+                            returnsILogger = (retCls == iloggerCls);
+                        } catch (Throwable ignore) {
+                            // fallback to name equality if resolution fails
+                            returnsILogger = iloggerCls.getFullName().equals(ret.getObject());
+                        }
+                    }
+                    if (!returnsILogger) {
+						LOG.debug("google-helpers: method {} has non-ILogger return {}", m, ret);
+                        continue;
+                    }
+                    MethodInfo mi = m.getMethodInfo();
+                    String[] args = new String[] {
+                            TypeGen.signature(str),
+                            TypeGen.signature(str),
+                            TypeGen.signature(i32),
+                            TypeGen.signature(str)
+                    };
+                    String retSig = TypeGen.signature(ArgType.object(iloggerCls.getFullName()));
+                    MethodRef ref = new MethodRef(iloggerCls.getFullName(), mi.getName(), true, args, retSig);
+                    discoveredILoggerIface = iloggerCls; // save for later owner checks
+                    LOG.info("google-helpers: discovered ILogger.setLocation candidate: {}->{}", iloggerCls.getFullName(), mi.getShortId());
+                    return ref;
+                }
+            }
+            LOG.warn("google-helpers: setLocation-like method not found in ILogger {}", iloggerCls.getFullName());
+        } catch (Throwable t) {
+            LOG.debug("google-helpers: discoverILoggerSetLocation failed: {}", t.toString());
         }
         return null;
     }
